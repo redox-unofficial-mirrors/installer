@@ -806,12 +806,12 @@ fn install_inner(config: Config, output: &Path) -> Result<()> {
     if output.is_dir() {
         install_dir(config, output, cookbook)
     } else {
-        if !output.is_file() {
-            let fs_size = config.general.filesystem_size.unwrap_or(0) as u64;
-            // arbitrary size approximately fit just for initfs
-            if fs_size < 32 {
-                bail!("Refusing to create image disk less than 32 MB");
-            }
+        let fs_size = config.general.filesystem_size.unwrap_or(0) as u64;
+        // arbitrary size approximately fit just for initfs
+        if fs_size < 32 {
+            bail!("Refusing to create image disk less than 32 MB");
+        }
+        if !output.exists() {
             eprintln!(
                 "Creating a new file to {} with size {} MB",
                 output.display(),
@@ -819,6 +819,8 @@ fn install_inner(config: Config, output: &Path) -> Result<()> {
             );
             let file = fs::File::create(output)?;
             file.set_len(fs_size * 1024 * 1024)?;
+        } else {
+            eprintln!("Overwriting {} with size {} MB", output.display(), fs_size);
         }
         let live = config.general.live_disk.unwrap_or(false);
         let password_opt = config.general.encrypt_disk.clone();
