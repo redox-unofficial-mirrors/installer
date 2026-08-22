@@ -28,6 +28,7 @@ pub struct DiskOption<'a> {
     pub bootloader_efi: &'a [u8],
     pub password_opt: Option<&'a [u8]>,
     pub efi_partition_size: Option<u32>, //MiB
+    pub efi_partition_path: Option<&'a str>,
     pub skip_partitions: bool,
 }
 
@@ -531,20 +532,22 @@ where
 {
     let target = get_target();
 
-    let bootloader_efi_name = match target.as_str() {
-        "aarch64-unknown-redox" => "BOOTAA64.EFI",
-        "i586-unknown-redox" | "i686-unknown-redox" => "BOOTIA32.EFI",
-        "x86_64-unknown-redox" => "BOOTX64.EFI",
-        "riscv64gc-unknown-redox" => "BOOTRISCV64.EFI",
-        _ => {
-            bail!("target '{target}' not supported");
-        }
-    };
+    let bootloader_efi_name = bootloader_efi_name(target)?;
     // Open disk and read metadata
     eprintln!("Opening disk {}", disk_path.as_ref().display());
     let mut disk_file = DiskWrapper::open(disk_path.as_ref())?;
     let disk_size = disk_file.size();
     let block_size = disk_file.block_size() as u64;
+
+    if let Some(efi_partition_path) = disk_option.efi_partition_path {
+        let mut disk_efi = DiskWrapper::open(efi_partition_path)?;
+        eprintln!("Write bootloader to {:?}", efi_partition_path);
+        format_and_install_efi(
+            &mut disk_efi,
+            bootloader_efi_name,
+            disk_option.bootloader_efi,
+        )?;
+    }
 
     if disk_option.skip_partitions {
         return with_redoxfs(
@@ -576,11 +579,7 @@ where
 
     // Second megabyte of the disk is reserved for EFI partition
     let efi_start = bios_end + 1;
-    let efi_size = if let Some(size) = disk_option.efi_partition_size {
-        size as u64
-    } else {
-        1
-    };
+    let efi_size = disk_option.efi_partition_size.unwrap_or(1) as u64;
     let efi_end = efi_start + (efi_size * mibi / block_size) - 1;
 
     // The rest of the disk is RedoxFS, reserving the GPT table mirror at the end of disk
@@ -671,32 +670,11 @@ where
         let mut disk_efi =
             fscommon::StreamSlice::new(&mut disk_file, disk_efi_start, disk_efi_end)?;
 
-        eprintln!(
-            "Formatting EFI partition with size {:#x}",
-            disk_efi_end - disk_efi_start
-        );
-        fatfs::format_volume(&mut disk_efi, fatfs::FormatVolumeOptions::new())?;
-
-        eprintln!("Opening EFI partition");
-        let fs = fatfs::FileSystem::new(&mut disk_efi, fatfs::FsOptions::new())?;
-
-        eprintln!("Creating EFI directory");
-        let root_dir = fs.root_dir();
-        root_dir.create_dir("EFI")?;
-
-        eprintln!("Creating EFI/BOOT directory");
-        let efi_dir = root_dir.open_dir("EFI")?;
-        efi_dir.create_dir("BOOT")?;
-
-        eprintln!(
-            "Writing EFI/BOOT/{} file with size {:#x}",
+        format_and_install_efi(
+            &mut disk_efi,
             bootloader_efi_name,
-            disk_option.bootloader_efi.len()
-        );
-        let boot_dir = efi_dir.open_dir("BOOT")?;
-        let mut file = boot_dir.create_file(bootloader_efi_name)?;
-        file.truncate()?;
-        file.write_all(&disk_option.bootloader_efi)?;
+            disk_option.bootloader_efi,
+        )?;
     }
 
     // Format and install RedoxFS partition
@@ -710,6 +688,51 @@ where
         (redoxfs_end + 1) * block_size,
     )?);
     with_redoxfs(disk_redoxfs, disk_option.password_opt, callback)
+}
+
+fn bootloader_efi_name(target: String) -> Result<&'static str> {
+    let name = match target.as_str() {
+        "aarch64-unknown-redox" => "BOOTAA64.EFI",
+        "i586-unknown-redox" | "i686-unknown-redox" => "BOOTIA32.EFI",
+        "x86_64-unknown-redox" => "BOOTX64.EFI",
+        "riscv64gc-unknown-redox" => "BOOTRISCV64.EFI",
+        _ => {
+            bail!("target '{target}' not supported");
+        }
+    };
+    Ok(name)
+}
+
+fn format_and_install_efi<T: fatfs::ReadWriteSeek>(
+    disk_efi: &mut T,
+    bootloader_name: &str,
+    bootloader_data: &[u8],
+) -> Result<()> {
+    eprintln!("Formatting EFI partition...");
+    fatfs::format_volume(&mut *disk_efi, fatfs::FormatVolumeOptions::new())?;
+
+    eprintln!("Opening EFI partition");
+    let fs = fatfs::FileSystem::new(disk_efi, fatfs::FsOptions::new())?;
+
+    eprintln!("Creating EFI directory");
+    let root_dir = fs.root_dir();
+    root_dir.create_dir("EFI")?;
+
+    eprintln!("Creating EFI/BOOT directory");
+    let efi_dir = root_dir.open_dir("EFI")?;
+    efi_dir.create_dir("BOOT")?;
+
+    eprintln!(
+        "Writing EFI/BOOT/{} file with size {:#x}",
+        bootloader_name,
+        bootloader_data.len()
+    );
+    let boot_dir = efi_dir.open_dir("BOOT")?;
+    let mut file = boot_dir.create_file(bootloader_name)?;
+    file.truncate()?;
+    file.write_all(bootloader_data)?;
+
+    Ok(())
 }
 
 #[cfg(not(target_os = "redox"))]
@@ -826,14 +849,40 @@ fn install_inner(config: Config, output: &Path) -> Result<()> {
         let password_opt = config.general.encrypt_disk.clone();
         let password_opt = password_opt.as_ref().map(|p| p.as_bytes());
         let (bootloader_bios, bootloader_efi) = fetch_bootloaders(&config, cookbook, live)?;
-        if let Some(write_bootloader) = &config.general.write_bootloader {
-            std::fs::write(write_bootloader, &bootloader_efi)?;
-        }
+        let efi_partition_path = match config
+            .general
+            .write_bootloader
+            .as_ref()
+            .map(|w| (std::fs::metadata(w), w))
+        {
+            Some((Ok(meta), write_bootloader)) => {
+                if !meta.is_dir() && !meta.is_file() {
+                    Some(write_bootloader.clone())
+                } else if meta.is_dir() {
+                    let dir = Path::new(write_bootloader).join("EFI/BOOT");
+                    std::fs::create_dir_all(&dir)?;
+                    std::fs::write(
+                        dir.join(bootloader_efi_name(get_target())?),
+                        &bootloader_efi,
+                    )?;
+                    None
+                } else {
+                    std::fs::write(write_bootloader, &bootloader_efi)?;
+                    None
+                }
+            }
+            Some((Err(_), write_bootloader)) => {
+                std::fs::write(write_bootloader, &bootloader_efi)?;
+                None
+            }
+            None => None,
+        };
         let disk_option = DiskOption {
             bootloader_bios: &bootloader_bios,
             bootloader_efi: &bootloader_efi,
             password_opt: password_opt,
             efi_partition_size: config.general.efi_partition_size,
+            efi_partition_path: efi_partition_path.as_ref().map(|s| s.as_str()),
             skip_partitions: config.general.skip_partitions.unwrap_or(false),
         };
         with_whole_disk(output, &disk_option, move |fs| {

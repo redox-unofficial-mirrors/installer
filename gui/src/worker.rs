@@ -173,8 +173,9 @@ pub enum TargetConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootTargetConfig {
-    Partition((String, u64)),
+    Partition((String, u32)),
     Efi { path: String },
+    None,
 }
 
 impl TargetConfig {
@@ -204,7 +205,12 @@ impl TargetConfig {
     }
 }
 
-pub(crate) fn install<F: FnMut(Message)>(target: TargetConfig, profile: InstallConfig, mut f: F) {
+pub(crate) fn install<F: FnMut(Message)>(
+    target: TargetConfig,
+    boot: BootTargetConfig,
+    profile: InstallConfig,
+    mut f: F,
+) {
     let start = std::time::Instant::now();
     let password_opt = profile.password_opt.filter(|s| !s.is_empty());
     let mut config: Config = match profile.kind {
@@ -223,6 +229,10 @@ pub(crate) fn install<F: FnMut(Message)>(target: TargetConfig, profile: InstallC
     config.general.encrypt_disk = password_opt;
     config.general.skip_partitions = Some(target.is_skip_partition());
     config.general.filesystem_size = Some(target.install_size_mb() as u32);
+    config.general.write_bootloader = match boot {
+        BootTargetConfig::Partition((path, _)) | BootTargetConfig::Efi { path } => Some(path),
+        BootTargetConfig::None => None,
+    };
 
     macro_rules! message {
         ($($arg:tt)*) => {{
@@ -314,6 +324,7 @@ pub(crate) fn install_clone_disk<F: FnMut(Message)>(
         bootloader_efi: &bootloader_efi,
         password_opt: password_opt.as_ref().map(|x| x.as_bytes()),
         efi_partition_size: None,
+        efi_partition_path: None,
         skip_partitions: target.is_skip_partition(),
     };
 

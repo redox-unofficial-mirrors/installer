@@ -75,7 +75,7 @@ enum Page {
     },
     Profile {
         target: TargetConfig,
-        bootloader: Option<BootTargetConfig>,
+        bootloader: BootTargetConfig,
         selected: InstallConfig,
     },
     Sudo(String),
@@ -86,7 +86,7 @@ enum Page {
 
 #[derive(Clone, Debug)]
 struct Worker {
-    command_sender: std::sync::mpsc::Sender<(TargetConfig, InstallConfig)>,
+    command_sender: std::sync::mpsc::Sender<(TargetConfig, BootTargetConfig, InstallConfig)>,
     join_handle: Arc<std::thread::JoinHandle<()>>,
 }
 
@@ -151,8 +151,8 @@ impl Window {
                         let (message_sender, message_receiver) = mpsc::unbounded();
 
                         let join_handle = std::thread::spawn(move || {
-                            while let Ok((target, profile)) = command_receiver.recv() {
-                                install(target, profile, |message| {
+                            while let Ok((target, boot, profile)) = command_receiver.recv() {
+                                install(target, boot, profile, |message| {
                                     message_sender.unbounded_send(message).unwrap();
                                 });
                             }
@@ -305,7 +305,12 @@ impl Application for Window {
                         self.page = Page::Profile {
                             target: TargetConfig::Disk((disk_path.clone(), *disk_size)),
                             selected: InstallConfig::default(),
-                            bootloader: boot.map(|(p, _, s)| BootTargetConfig::Partition((p, s))),
+                            bootloader: match boot {
+                                Some((p, _, s)) => {
+                                    BootTargetConfig::Partition((p, (s / 1024 * 1024) as u32))
+                                }
+                                None => BootTargetConfig::None,
+                            },
                         };
                     }
                 }
@@ -406,9 +411,12 @@ impl Application for Window {
                                     size_mb,
                                     skip_partition: *skip_partition,
                                 },
-                                bootloader: path_efi.as_ref().map(|s| BootTargetConfig::Efi {
-                                    path: s.to_string(),
-                                }),
+                                bootloader: match path_efi.as_ref() {
+                                    Some(s) => BootTargetConfig::Efi {
+                                        path: s.to_string(),
+                                    },
+                                    None => BootTargetConfig::None,
+                                },
                                 selected: InstallConfig::default(),
                             };
                         }
@@ -445,12 +453,12 @@ impl Application for Window {
                     selected: profile,
                 } = &self.page
                 {
-                    // TODO: bootloader
                     if let Some(worker) = &self.worker_opt {
-                        match worker
-                            .command_sender
-                            .send((target.clone(), profile.clone()))
-                        {
+                        match worker.command_sender.send((
+                            target.clone(),
+                            bootloader.clone(),
+                            profile.clone(),
+                        )) {
                             Ok(()) => self.page = Page::Install(0, format!("Starting install...")),
                             Err(err) => {
                                 self.page = Page::Error(format!("failed to send command: {}", err));
@@ -482,12 +490,12 @@ impl Application for Window {
                         TargetConfig::Partition((disk_path, _)) => {
                             let selected_disk_i =
                                 self.disk_paths.iter().position(|(p, _, _)| p == disk_path);
-                            let selected_boot_i = bootloader.as_ref().and_then(|s| match s {
+                            let selected_boot_i = match bootloader {
                                 BootTargetConfig::Partition((s, _)) => {
-                                    self.disk_paths.iter().position(|(p, _, _)| p == s)
+                                    self.disk_paths.iter().position(|(p, _, _)| *p == *s)
                                 }
                                 _ => None,
-                            });
+                            };
                             Page::DrivePart {
                                 kind: TargetKind::Partition,
                                 selected_disk_i,
@@ -500,10 +508,10 @@ impl Application for Window {
                             skip_partition,
                         } => Page::ImageConfig {
                             path: path.clone(),
-                            path_efi: bootloader.as_ref().and_then(|s| match s {
+                            path_efi: match bootloader {
                                 BootTargetConfig::Efi { path } => Some(path.to_string()),
                                 _ => None,
-                            }),
+                            },
                             size: size_mb.to_string(),
                             skip_partition: *skip_partition,
                         },
