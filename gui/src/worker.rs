@@ -171,6 +171,12 @@ pub enum TargetConfig {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootTargetConfig {
+    Partition((String, u64)),
+    Efi { path: String },
+}
+
 impl TargetConfig {
     pub fn is_skip_partition(&self) -> bool {
         match self {
@@ -185,7 +191,7 @@ impl TargetConfig {
     pub fn install_path(&self) -> &str {
         match self {
             TargetConfig::Disk((s, _)) => s.as_str(),
-            TargetConfig::Partition((s, _)) => s.as_str(),
+            TargetConfig::Partition((s, ..)) => s.as_str(),
             TargetConfig::Image { path, .. } => path.as_str(),
         }
     }

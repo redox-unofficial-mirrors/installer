@@ -19,6 +19,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::{self, Read, Write},
+    iter::Once,
     os::unix::fs::{symlink, MetadataExt, OpenOptionsExt},
     path::Path,
     sync::Arc,
@@ -64,14 +65,17 @@ enum Page {
     DrivePart {
         kind: TargetKind,
         selected_disk_i: Option<usize>,
+        selected_boot_i: Option<usize>,
     },
     ImageConfig {
         path: String,
+        path_efi: Option<String>,
         size: String,
         skip_partition: bool,
     },
     Profile {
         target: TargetConfig,
+        bootloader: Option<BootTargetConfig>,
         selected: InstallConfig,
     },
     Sudo(String),
@@ -96,11 +100,18 @@ enum Message {
     BeginChoose(TargetKind),
     BeginConfirm,
     DrivePartChoose(usize),
+    DrivePartChooseBoot(usize),
+    DrivePartReload,
     DrivePartConfirm,
     ImagePathInput(String),
     ImageSizeInput(String),
+    ImageSkipPartition(bool),
+    ImageWriteBootloader(bool),
+    ImageWriteBootloaderPathInput(String),
     ImageBrowse,
     ImageBrowseResult(Option<String>),
+    ImageBrowseBootloader,
+    ImageBrowseBootloaderResult(Option<String>),
     ImageConfirm,
     ProfileChoose(InstallConfigKind),
     ProfileChooseLive(bool),
@@ -108,6 +119,7 @@ enum Message {
     ProfileEnterPassword(String),
     ProfileConfirm,
     GoBack,
+    WindowDrag,
 
     Install(usize, String),
     Success(String),
@@ -219,6 +231,7 @@ impl Application for Window {
         elements.push(
             cosmic::widget::header_bar()
                 .title("Redox OS Installer")
+                .on_drag(Message::WindowDrag)
                 .into(),
         );
 
@@ -240,9 +253,11 @@ impl Application for Window {
                         TargetKind::Drive | TargetKind::Partition => Page::DrivePart {
                             kind,
                             selected_disk_i: None,
+                            selected_boot_i: None,
                         },
                         TargetKind::Image => Page::ImageConfig {
                             path: String::new(),
+                            path_efi: None,
                             size: "1024".to_string(),
                             skip_partition: false,
                         },
@@ -250,23 +265,47 @@ impl Application for Window {
                 }
             }
             Message::DrivePartChoose(disk_i) => {
-                if let Page::DrivePart { kind, .. } = self.page {
-                    self.page = Page::DrivePart {
-                        kind,
-                        selected_disk_i: Some(disk_i),
+                if let Page::DrivePart {
+                    selected_disk_i,
+                    selected_boot_i,
+                    ..
+                } = &mut self.page
+                {
+                    *selected_disk_i = Some(disk_i);
+                    *selected_boot_i = None;
+                }
+            }
+            Message::DrivePartChooseBoot(disk_i) => {
+                if let Page::DrivePart {
+                    selected_boot_i, ..
+                } = &mut self.page
+                {
+                    *selected_boot_i = if disk_i == usize::MAX {
+                        None
+                    } else {
+                        Some(disk_i)
                     };
                 }
             }
+            Message::DrivePartReload => match disk_paths() {
+                Ok(disks) => self.disk_paths = disks,
+                Err(e) => eprintln!("{e}"),
+            },
             Message::DrivePartConfirm => {
                 if let Page::DrivePart {
                     selected_disk_i: Some(i),
+                    selected_boot_i,
                     ..
                 } = self.page
                 {
                     if let Some((disk_path, _, disk_size)) = self.disk_paths.get(i) {
+                        let boot = selected_boot_i
+                            .and_then(|i| self.disk_paths.get(i))
+                            .cloned();
                         self.page = Page::Profile {
                             target: TargetConfig::Disk((disk_path.clone(), *disk_size)),
                             selected: InstallConfig::default(),
+                            bootloader: boot.map(|(p, _, s)| BootTargetConfig::Partition((p, s))),
                         };
                     }
                 }
@@ -301,12 +340,62 @@ impl Application for Window {
                     *path = new_path;
                 }
             }
+            Message::ImageSkipPartition(new_val) => {
+                if let Page::ImageConfig {
+                    ref mut skip_partition,
+                    ..
+                } = self.page
+                {
+                    *skip_partition = new_val;
+                }
+            }
             Message::ImageBrowseResult(None) => {}
+            Message::ImageWriteBootloader(new_val) => {
+                if let Page::ImageConfig {
+                    ref mut path_efi, ..
+                } = self.page
+                {
+                    *path_efi = if new_val { Some("".to_string()) } else { None };
+                }
+            }
+            Message::ImageWriteBootloaderPathInput(new_val) => {
+                if let Page::ImageConfig {
+                    ref mut path_efi, ..
+                } = self.page
+                {
+                    *path_efi = Some(new_val);
+                }
+            }
+            Message::ImageBrowseBootloader => {
+                #[cfg(target_os = "linux")]
+                return Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Save Bootloader EFI File")
+                            .save_file()
+                            .await
+                            .map(|f| f.path().to_str().unwrap().to_string())
+                    },
+                    |result| Message::ImageBrowseBootloaderResult(result).into(),
+                );
+                #[cfg(not(target_os = "linux"))]
+                unreachable!()
+            }
+            Message::ImageBrowseBootloaderResult(Some(new_path)) => {
+                if let Page::ImageConfig {
+                    ref mut path_efi, ..
+                } = self.page
+                {
+                    *path_efi = Some(new_path);
+                }
+            }
+            Message::ImageBrowseBootloaderResult(None) => {}
             Message::ImageConfirm => {
                 if let Page::ImageConfig {
                     path,
                     size,
                     skip_partition,
+                    path_efi,
                 } = &self.page
                 {
                     match size.parse::<u64>() {
@@ -317,6 +406,9 @@ impl Application for Window {
                                     size_mb,
                                     skip_partition: *skip_partition,
                                 },
+                                bootloader: path_efi.as_ref().map(|s| BootTargetConfig::Efi {
+                                    path: s.to_string(),
+                                }),
                                 selected: InstallConfig::default(),
                             };
                         }
@@ -349,9 +441,11 @@ impl Application for Window {
             Message::ProfileConfirm => {
                 if let Page::Profile {
                     target,
+                    bootloader,
                     selected: profile,
                 } = &self.page
                 {
+                    // TODO: bootloader
                     if let Some(worker) = &self.worker_opt {
                         match worker
                             .command_sender
@@ -372,7 +466,9 @@ impl Application for Window {
                 Page::ImageConfig { .. } => {
                     self.page = Page::Begin(Some(TargetKind::Image));
                 }
-                Page::Profile { target, .. } => {
+                Page::Profile {
+                    target, bootloader, ..
+                } => {
                     self.page = match target {
                         TargetConfig::Disk((disk_path, _)) => {
                             let selected_disk_i =
@@ -380,14 +476,22 @@ impl Application for Window {
                             Page::DrivePart {
                                 kind: TargetKind::Drive,
                                 selected_disk_i,
+                                selected_boot_i: None,
                             }
                         }
                         TargetConfig::Partition((disk_path, _)) => {
                             let selected_disk_i =
                                 self.disk_paths.iter().position(|(p, _, _)| p == disk_path);
+                            let selected_boot_i = bootloader.as_ref().and_then(|s| match s {
+                                BootTargetConfig::Partition((s, _)) => {
+                                    self.disk_paths.iter().position(|(p, _, _)| p == s)
+                                }
+                                _ => None,
+                            });
                             Page::DrivePart {
                                 kind: TargetKind::Partition,
                                 selected_disk_i,
+                                selected_boot_i,
                             }
                         }
                         TargetConfig::Image {
@@ -396,6 +500,10 @@ impl Application for Window {
                             skip_partition,
                         } => Page::ImageConfig {
                             path: path.clone(),
+                            path_efi: bootloader.as_ref().and_then(|s| match s {
+                                BootTargetConfig::Efi { path } => Some(path.to_string()),
+                                _ => None,
+                            }),
                             size: size_mb.to_string(),
                             skip_partition: *skip_partition,
                         },
@@ -442,6 +550,11 @@ impl Application for Window {
                 }
                 if let Some(window_id) = self.core.main_window_id() {
                     return window::close(window_id);
+                }
+            }
+            Message::WindowDrag => {
+                if let Some(window_id) = self.core.main_window_id() {
+                    return window::drag(window_id);
                 }
             }
         }
@@ -497,11 +610,12 @@ impl Application for Window {
             Page::DrivePart {
                 kind,
                 selected_disk_i,
+                selected_boot_i,
             } => {
                 let is_part = *kind == TargetKind::Partition;
                 widgets.push(
                     text(if is_part {
-                        "Choose a partition:"
+                        "Choose a main partition:"
                     } else {
                         "Choose a drive:"
                     })
@@ -510,35 +624,73 @@ impl Application for Window {
                 );
 
                 if !self.disk_paths.is_empty() {
-                    for (disk_i, (disk_path, is_partition, disk_size)) in
-                        self.disk_paths.iter().enumerate()
+                    for (disk_i, (disk_path, _, disk_size)) in self
+                        .disk_paths
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (_, i, _))| *i == is_part)
                     {
-                        if *is_partition == is_part {
+                        let radio = radio(
+                            text(disk_path),
+                            disk_i,
+                            *selected_disk_i,
+                            Message::DrivePartChoose,
+                        );
+                        widgets.push(
+                            row![
+                                radio,
+                                space::horizontal(),
+                                text(redox_installer::format_bytes(*disk_size)),
+                            ]
+                            .into(),
+                        );
+                    }
+
+                    if is_part && widgets.len() > 2 {
+                        let edisk = selected_disk_i.unwrap_or(usize::MAX);
+                        let bdisk = selected_boot_i.unwrap_or(usize::MAX);
+                        let elabel = ("Do not write".to_string(), true, 0);
+                        widgets.push(text("Choose a partition for bootloader:").size(20).into());
+                        for (disk_i, (disk_path, _, disk_size)) in self
+                            .disk_paths
+                            .iter()
+                            .enumerate()
+                            .filter(|(e, (_, i, _))| *i == is_part && *e != edisk)
+                            .chain(std::iter::once((usize::MAX, &elabel)))
+                        {
+                            let radio = radio(
+                                text(disk_path.to_string()),
+                                disk_i,
+                                Some(bdisk),
+                                Message::DrivePartChooseBoot,
+                            );
                             widgets.push(
                                 row![
-                                    radio(
-                                        text(disk_path),
-                                        disk_i,
-                                        *selected_disk_i,
-                                        Message::DrivePartChoose
-                                    ),
+                                    radio,
                                     space::horizontal(),
-                                    text(redox_installer::format_bytes(*disk_size)),
+                                    text(if disk_i == usize::MAX {
+                                        "".to_string()
+                                    } else {
+                                        redox_installer::format_bytes(*disk_size)
+                                    }),
                                 ]
                                 .into(),
                             );
                         }
                     }
 
-                    if selected_disk_i.is_some() && is_root() {
+                    if is_root() {
                         widgets.push(space::vertical().into());
-                        widgets.push(
-                            row![
-                                space::horizontal(),
+                        let rows = row![
+                            button::standard("Reload").on_press(Message::DrivePartReload),
+                            space::horizontal(),
+                        ];
+
+                        if selected_disk_i.is_some() {
+                            rows.push(
                                 button::suggested("Next").on_press(Message::DrivePartConfirm),
-                            ]
-                            .into(),
-                        );
+                            );
+                        }
                     }
                 } else {
                     widgets.push(text("No matching devices found").into());
@@ -565,6 +717,7 @@ impl Application for Window {
                 path,
                 size,
                 skip_partition,
+                path_efi,
             } => {
                 widgets.push(text("Configure Image File").size(24).into());
                 widgets.push(text("Image Path:").into());
@@ -588,7 +741,35 @@ impl Application for Window {
                         .into(),
                 );
 
-                widgets.push(checkbox(*skip_partition).label("Skip Partition?").into());
+                widgets.push(
+                    checkbox(*skip_partition)
+                        .label("Skip Partition?")
+                        .on_toggle(Message::ImageSkipPartition)
+                        .into(),
+                );
+
+                widgets.push(
+                    checkbox(*skip_partition)
+                        .label("Write bootloader EFI?")
+                        .on_toggle(Message::ImageWriteBootloader)
+                        .into(),
+                );
+
+                if path_efi.is_some() {
+                    widgets.push(
+                        row![
+                            text_input("e.g. boot.efi", path)
+                                .on_input(Message::ImageWriteBootloaderPathInput),
+                            if cfg!(target_os = "linux") {
+                                button::standard("Browse").on_press(Message::ImageBrowseBootloader)
+                            } else {
+                                button::standard("")
+                            },
+                        ]
+                        .spacing(8)
+                        .into(),
+                    );
+                }
 
                 if !path.is_empty() && size.parse::<u64>().is_ok() {
                     widgets.push(space::vertical().into());
