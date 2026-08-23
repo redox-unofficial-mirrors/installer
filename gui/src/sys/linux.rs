@@ -1,4 +1,4 @@
-use std::{fs, os::unix::process::CommandExt, process::Command};
+use std::{fs, io::Write, os::unix::process::CommandExt, path::Path, process::Command};
 
 pub fn ask_root() -> Result<(), String> {
     let Ok(exe_path) = std::env::current_exe() else {
@@ -28,6 +28,24 @@ pub fn ask_root() -> Result<(), String> {
 pub fn is_root() -> bool {
     let euid = unsafe { libc::geteuid() };
     euid == 0
+}
+
+pub fn is_boot_systemd() -> bool {
+    Path::new("/boot/efi/EFI/systemd/").is_dir() && Path::new("/boot/efi/loader/entries/").is_dir()
+}
+
+pub fn install_boot_systemd() -> Result<(), std::io::Error> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open("/boot/efi/loader/entries/redox.conf")?;
+    file.write_fmt(format_args!("title   Redox OS\n"))?;
+    file.write_fmt(format_args!(
+        "efi     /EFI/redox/{}\n",
+        redox_installer::bootloader_efi_name().unwrap()
+    ))?;
+    Ok(())
 }
 
 pub fn disk_paths() -> Result<Vec<(String, bool, u64)>, String> {

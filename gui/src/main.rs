@@ -1,4 +1,3 @@
-use anyhow::format_err;
 use cosmic::{
     app::{self, Task},
     iced::{
@@ -11,19 +10,7 @@ use cosmic::{
     Application, ApplicationExt, Core, Element,
 };
 use futures_channel::mpsc;
-use pkgar::{ext::EntryExt, PackageHead};
-use pkgar_core::PackageSrc;
-use pkgar_keys::PublicKeyFile;
-use redox_installer::{try_fast_install, with_redoxfs_mount, with_whole_disk, Config, DiskOption};
-use std::{
-    ffi::OsStr,
-    fs,
-    io::{self, Read, Write},
-    iter::Once,
-    os::unix::fs::{symlink, MetadataExt, OpenOptionsExt},
-    path::Path,
-    sync::Arc,
-};
+use std::sync::Arc;
 
 mod sys;
 mod worker;
@@ -65,7 +52,7 @@ enum Page {
     DrivePart {
         kind: TargetKind,
         selected_disk_i: Option<usize>,
-        selected_boot_i: Option<usize>,
+        selected_boot_i: BootTargetConfig,
     },
     ImageConfig {
         path: String,
@@ -253,7 +240,7 @@ impl Application for Window {
                         TargetKind::Drive | TargetKind::Partition => Page::DrivePart {
                             kind,
                             selected_disk_i: None,
-                            selected_boot_i: None,
+                            selected_boot_i: BootTargetConfig::None,
                         },
                         TargetKind::Image => Page::ImageConfig {
                             path: String::new(),
@@ -272,7 +259,7 @@ impl Application for Window {
                 } = &mut self.page
                 {
                     *selected_disk_i = Some(disk_i);
-                    *selected_boot_i = None;
+                    *selected_boot_i = BootTargetConfig::None;
                 }
             }
             Message::DrivePartChooseBoot(disk_i) => {
@@ -280,10 +267,14 @@ impl Application for Window {
                     selected_boot_i, ..
                 } = &mut self.page
                 {
-                    *selected_boot_i = if disk_i == usize::MAX {
-                        None
-                    } else {
-                        Some(disk_i)
+                    *selected_boot_i = match disk_i {
+                        0 => BootTargetConfig::None,
+                        #[cfg(target_os = "linux")]
+                        1 => BootTargetConfig::SystemdBoot,
+                        _ => BootTargetConfig::Efi {
+                            path: self.disk_paths.get(disk_i - 2).unwrap().0.to_string(),
+                            index: disk_i,
+                        },
                     };
                 }
             }
@@ -296,21 +287,14 @@ impl Application for Window {
                     selected_disk_i: Some(i),
                     selected_boot_i,
                     ..
-                } = self.page
+                } = &self.page
                 {
-                    if let Some((disk_path, _, disk_size)) = self.disk_paths.get(i) {
-                        let boot = selected_boot_i
-                            .and_then(|i| self.disk_paths.get(i))
-                            .cloned();
+                    if let Some((disk_path, _, disk_size)) = self.disk_paths.get(*i) {
+                        let bootloader = selected_boot_i.clone();
                         self.page = Page::Profile {
                             target: TargetConfig::Disk((disk_path.clone(), *disk_size)),
                             selected: InstallConfig::default(),
-                            bootloader: match boot {
-                                Some((p, _, s)) => {
-                                    BootTargetConfig::Partition((p, (s / 1024 * 1024) as u32))
-                                }
-                                None => BootTargetConfig::None,
-                            },
+                            bootloader,
                         };
                     }
                 }
@@ -414,6 +398,7 @@ impl Application for Window {
                                 bootloader: match path_efi.as_ref() {
                                     Some(s) => BootTargetConfig::Efi {
                                         path: s.to_string(),
+                                        index: 0,
                                     },
                                     None => BootTargetConfig::None,
                                 },
@@ -484,22 +469,16 @@ impl Application for Window {
                             Page::DrivePart {
                                 kind: TargetKind::Drive,
                                 selected_disk_i,
-                                selected_boot_i: None,
+                                selected_boot_i: BootTargetConfig::None,
                             }
                         }
                         TargetConfig::Partition((disk_path, _)) => {
                             let selected_disk_i =
                                 self.disk_paths.iter().position(|(p, _, _)| p == disk_path);
-                            let selected_boot_i = match bootloader {
-                                BootTargetConfig::Partition((s, _)) => {
-                                    self.disk_paths.iter().position(|(p, _, _)| *p == *s)
-                                }
-                                _ => None,
-                            };
                             Page::DrivePart {
                                 kind: TargetKind::Partition,
                                 selected_disk_i,
-                                selected_boot_i,
+                                selected_boot_i: bootloader.clone(),
                             }
                         }
                         TargetConfig::Image {
@@ -509,7 +488,7 @@ impl Application for Window {
                         } => Page::ImageConfig {
                             path: path.clone(),
                             path_efi: match bootloader {
-                                BootTargetConfig::Efi { path } => Some(path.to_string()),
+                                BootTargetConfig::Efi { path, .. } => Some(path.to_string()),
                                 _ => None,
                             },
                             size: size_mb.to_string(),
@@ -659,16 +638,28 @@ impl Application for Window {
 
                     if is_part && widgets.len() > 2 {
                         let edisk = selected_disk_i.unwrap_or(usize::MAX);
-                        let bdisk = selected_boot_i.unwrap_or(usize::MAX);
+                        let bdisk = match selected_boot_i {
+                            BootTargetConfig::Efi { index, .. } => *index,
+                            #[cfg(target_os = "linux")]
+                            BootTargetConfig::SystemdBoot => 1,
+                            BootTargetConfig::None => 0,
+                        };
                         let elabel = ("Do not write".to_string(), true, 0);
+                        let slabel = ("Dual-boot (systemd-boot)".to_string(), true, 0);
                         widgets.push(text("Choose a partition for bootloader:").size(20).into());
-                        for (disk_i, (disk_path, _, disk_size)) in self
-                            .disk_paths
-                            .iter()
-                            .enumerate()
-                            .filter(|(e, (_, i, _))| *i == is_part && *e != edisk)
-                            .chain(std::iter::once((usize::MAX, &elabel)))
+                        for (disk_i, (disk_path, _, disk_size)) in std::iter::once((0, &elabel))
+                            .chain(std::iter::once((1, &slabel)))
+                            .chain(
+                                self.disk_paths
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(e, (_, i, _))| *i == is_part && *e != edisk),
+                            )
                         {
+                            #[cfg(target_os = "linux")]
+                            if disk_i == 1 && !sys::is_boot_systemd() {
+                                continue;
+                            }
                             let radio = radio(
                                 text(disk_path.to_string()),
                                 disk_i,
@@ -679,7 +670,7 @@ impl Application for Window {
                                 row![
                                     radio,
                                     space::horizontal(),
-                                    text(if disk_i == usize::MAX {
+                                    text(if disk_i < 2 {
                                         "".to_string()
                                     } else {
                                         redox_installer::format_bytes(*disk_size)

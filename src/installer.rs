@@ -36,14 +36,15 @@ pub fn get_target() -> String {
     // TODO: Configurable from filesystem config?
     env::var("TARGET").unwrap_or_else(|_| {
         if cfg!(target_arch = "aarch64") {
-            "aarch64-unknown-redox".to_string()
+            "aarch64-unknown-redox"
         } else if cfg!(target_arch = "x86") {
-            "i586-unknown-redox".to_string()
+            "i586-unknown-redox"
         } else if cfg!(target_arch = "riscv64") {
-            "riscv64gc-unknown-redox".to_string()
+            "riscv64gc-unknown-redox"
         } else {
-            "x86_64-unknown-redox".to_string()
+            "x86_64-unknown-redox"
         }
+        .to_string()
     })
 }
 
@@ -538,9 +539,7 @@ where
     P: AsRef<Path>,
     F: FnOnce(FileSystem<DiskIo<fscommon::StreamSlice<DiskWrapper>>>) -> Result<T>,
 {
-    let target = get_target();
-
-    let bootloader_efi_name = bootloader_efi_name(target)?;
+    let bootloader_efi_name = bootloader_efi_name()?;
     // Open disk and read metadata
     eprintln!("Opening disk {}", disk_path.as_ref().display());
     let mut disk_file = DiskWrapper::open(disk_path.as_ref())?;
@@ -698,7 +697,8 @@ where
     with_redoxfs(disk_redoxfs, disk_option.password_opt, callback)
 }
 
-fn bootloader_efi_name(target: String) -> Result<&'static str> {
+pub fn bootloader_efi_name() -> Result<&'static str> {
+    let target = get_target();
     let name = match target.as_str() {
         "aarch64-unknown-redox" => "BOOTAA64.EFI",
         "i586-unknown-redox" | "i686-unknown-redox" => "BOOTIA32.EFI",
@@ -867,12 +867,9 @@ fn install_inner(config: Config, output: &Path) -> Result<()> {
                 if !meta.is_dir() && !meta.is_file() {
                     Some(write_bootloader.clone())
                 } else if meta.is_dir() {
-                    let dir = Path::new(write_bootloader).join("EFI/BOOT");
+                    let dir = Path::new(write_bootloader);
                     std::fs::create_dir_all(&dir)?;
-                    std::fs::write(
-                        dir.join(bootloader_efi_name(get_target())?),
-                        &bootloader_efi,
-                    )?;
+                    std::fs::write(dir.join(bootloader_efi_name()?), &bootloader_efi)?;
                     None
                 } else {
                     std::fs::write(write_bootloader, &bootloader_efi)?;
