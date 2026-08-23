@@ -34,9 +34,17 @@ pub struct DiskOption<'a> {
 
 pub fn get_target() -> String {
     // TODO: Configurable from filesystem config?
-    env::var("TARGET").unwrap_or(
-        option_env!("TARGET").map_or("x86_64-unknown-redox".to_string(), |x| x.to_string()),
-    )
+    env::var("TARGET").unwrap_or_else(|_| {
+        if cfg!(target_arch = "aarch64") {
+            "aarch64-unknown-redox".to_string()
+        } else if cfg!(target_arch = "x86") {
+            "i586-unknown-redox".to_string()
+        } else if cfg!(target_arch = "riscv64") {
+            "riscv64gc-unknown-redox".to_string()
+        } else {
+            "x86_64-unknown-redox".to_string()
+        }
+    })
 }
 
 /// Converts a password to a serialized argon2rs hash, understandable

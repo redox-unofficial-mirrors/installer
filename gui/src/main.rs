@@ -32,7 +32,7 @@ pub use worker::*;
 
 fn main() -> iced::Result {
     let mut settings = app::Settings::default();
-    settings = settings.size(Size::new(700.0, 500.0));
+    settings = settings.size(Size::new(700.0, 550.0));
     settings = settings.exit_on_close(false);
     app::run::<Window>(settings, ())
 }
@@ -606,8 +606,11 @@ impl Application for Window {
                     .into(),
                 );
 
+                widgets.push(space::vertical().into());
+                widgets.push(
+                    text(format!("Installing for: {}", redox_installer::get_target())).into(),
+                );
                 if target_opt.is_some() {
-                    widgets.push(space::vertical().into());
                     widgets.push(
                         button::suggested("Next")
                             .on_press(Message::BeginConfirm)
@@ -689,16 +692,17 @@ impl Application for Window {
 
                     if is_root() {
                         widgets.push(space::vertical().into());
-                        let rows = row![
+                        let mut rows = row![
                             button::standard("Reload").on_press(Message::DrivePartReload),
                             space::horizontal(),
                         ];
 
                         if selected_disk_i.is_some() {
-                            rows.push(
+                            rows = rows.push(
                                 button::suggested("Next").on_press(Message::DrivePartConfirm),
                             );
                         }
+                        widgets.push(rows.into());
                     }
                 } else {
                     widgets.push(text("No matching devices found").into());
