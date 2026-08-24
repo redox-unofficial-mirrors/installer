@@ -298,6 +298,7 @@ fn main() {
         bootloader_efi: &bootloader_efi,
         password_opt: password_opt.as_ref().map(|x| x.as_bytes()),
         efi_partition_size: None,
+        efi_partition_path: None,
         skip_partitions: false, // TODO?
     };
     let res = with_whole_disk(&disk_path, &disk_option, |mut fs| {

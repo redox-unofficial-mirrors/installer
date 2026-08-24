@@ -21,9 +21,9 @@ cargo build --release
 By default, you will be prompted to supply configuration options. You can
 use the scripted mode by supplying a configuration file:
 ```bash
-cargo run --release -- config/example.toml
+cargo run --release -- config/desktop.toml
 ```
-An example configuration can be found in [config/example.toml](./config/example.toml).
+An example configuration can be found in [config/desktop.toml](./config/desktop.toml).
 Unsuplied configuration will use the default. You can use the `general.prompt`
 setting to prompt when configuration is not set. Multiple configurations can
 be specified, they will be built in order.

@@ -1,6 +1,5 @@
 use crate::{InstallConfig, InstallConfigKind, Message};
 use anyhow::format_err;
-use futures_channel::mpsc;
 use pkgar::{ext::EntryExt, PackageHead};
 use pkgar_core::PackageSrc;
 use pkgar_keys::PublicKeyFile;
@@ -11,7 +10,6 @@ use std::{
     io::{self, Read, Write},
     os::unix::fs::{symlink, MetadataExt, OpenOptionsExt},
     path::Path,
-    sync::Arc,
 };
 
 pub fn copy_file(src: &Path, dest: &Path, buf: &mut [u8]) -> anyhow::Result<()> {
@@ -171,6 +169,17 @@ pub enum TargetConfig {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootTargetConfig {
+    Efi {
+        path: String,
+        index: usize,
+    },
+    #[cfg(target_os = "linux")]
+    SystemdBoot,
+    None,
+}
+
 impl TargetConfig {
     pub fn is_skip_partition(&self) -> bool {
         match self {
@@ -185,7 +194,7 @@ impl TargetConfig {
     pub fn install_path(&self) -> &str {
         match self {
             TargetConfig::Disk((s, _)) => s.as_str(),
-            TargetConfig::Partition((s, _)) => s.as_str(),
+            TargetConfig::Partition((s, ..)) => s.as_str(),
             TargetConfig::Image { path, .. } => path.as_str(),
         }
     }
@@ -198,8 +207,15 @@ impl TargetConfig {
     }
 }
 
-pub(crate) fn install<F: FnMut(Message)>(target: TargetConfig, profile: InstallConfig, mut f: F) {
+pub(crate) fn install<F: FnMut(Message)>(
+    target: TargetConfig,
+    boot: BootTargetConfig,
+    profile: InstallConfig,
+    mut f: F,
+) {
     let start = std::time::Instant::now();
+    #[cfg(target_os = "linux")]
+    let mut should_install_systemd_boot = false;
     let password_opt = profile.password_opt.filter(|s| !s.is_empty());
     let mut config: Config = match profile.kind {
         InstallConfigKind::Desktop => toml::from_str(include_str!("../../config/desktop.toml"))
@@ -213,11 +229,6 @@ pub(crate) fn install<F: FnMut(Message)>(target: TargetConfig, profile: InstallC
         }
     };
 
-    config.general.live_disk = Some(profile.live_disk);
-    config.general.encrypt_disk = password_opt;
-    config.general.skip_partitions = Some(target.is_skip_partition());
-    config.general.filesystem_size = Some(target.install_size_mb() as u32);
-
     macro_rules! message {
         ($($arg:tt)*) => {{
             eprintln!($($arg)*);
@@ -227,10 +238,41 @@ pub(crate) fn install<F: FnMut(Message)>(target: TargetConfig, profile: InstallC
             ));
         }}
     }
+
+    config.general.live_disk = Some(profile.live_disk);
+    config.general.encrypt_disk = password_opt;
+    config.general.skip_partitions = Some(target.is_skip_partition());
+    config.general.filesystem_size = Some(target.install_size_mb() as u32);
+    config.general.write_bootloader = match boot {
+        BootTargetConfig::Efi { path, .. } => Some(path),
+        #[cfg(target_os = "linux")]
+        BootTargetConfig::SystemdBoot => {
+            let path = "/boot/efi/EFI/redox";
+            if let Err(e) = fs::create_dir_all(path) {
+                message!("Failed installing: {e:?}");
+                return;
+            }
+            let path = "/boot/efi/EFI/redox";
+            if let Err(e) = fs::create_dir_all(path) {
+                message!("Failed installing: {e:?}");
+                return;
+            }
+            should_install_systemd_boot = true;
+            Some(path.to_string())
+        }
+        BootTargetConfig::None => None,
+    };
     message!("Installation progress is in terminal");
 
     // TODO: Show progress
-    match redox_installer::install(config, Path::new(target.install_path())) {
+    match redox_installer::install(config, Path::new(target.install_path())).and_then(|_| {
+        #[cfg(target_os = "linux")]
+        if should_install_systemd_boot {
+            println!("Installing boot entry to systemd-boot");
+            crate::sys::install_boot_systemd()?;
+        }
+        Ok(())
+    }) {
         Ok(_) => f(Message::Success(format!(
             "Finished installing in {:?}",
             start.elapsed()
@@ -308,6 +350,7 @@ pub(crate) fn install_clone_disk<F: FnMut(Message)>(
         bootloader_efi: &bootloader_efi,
         password_opt: password_opt.as_ref().map(|x| x.as_bytes()),
         efi_partition_size: None,
+        efi_partition_path: None,
         skip_partitions: target.is_skip_partition(),
     };
 
