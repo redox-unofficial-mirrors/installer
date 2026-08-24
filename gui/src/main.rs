@@ -653,7 +653,8 @@ impl Application for Window {
                                 self.disk_paths
                                     .iter()
                                     .enumerate()
-                                    .filter(|(e, (_, i, _))| *i == is_part && *e != edisk),
+                                    .filter(|(e, (_, i, _))| *i == is_part && *e != edisk)
+                                    .map(|(e, s)| (e + 2, s)),
                             )
                         {
                             #[cfg(target_os = "linux")]
@@ -752,16 +753,16 @@ impl Application for Window {
                 );
 
                 widgets.push(
-                    checkbox(*skip_partition)
+                    checkbox(path_efi.is_some())
                         .label("Write bootloader EFI?")
                         .on_toggle(Message::ImageWriteBootloader)
                         .into(),
                 );
 
-                if path_efi.is_some() {
+                if let Some(path_efi) = path_efi.as_ref() {
                     widgets.push(
                         row![
-                            text_input("e.g. boot.efi", path)
+                            text_input("e.g. boot.efi", path_efi)
                                 .on_input(Message::ImageWriteBootloaderPathInput),
                             if cfg!(target_os = "linux") {
                                 button::standard("Browse").on_press(Message::ImageBrowseBootloader)
