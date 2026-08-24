@@ -286,13 +286,22 @@ impl Application for Window {
                 if let Page::DrivePart {
                     selected_disk_i: Some(i),
                     selected_boot_i,
-                    ..
+                    kind,
                 } = &self.page
                 {
                     if let Some((disk_path, _, disk_size)) = self.disk_paths.get(*i) {
                         let bootloader = selected_boot_i.clone();
+                        let target = match kind {
+                            TargetKind::Drive => {
+                                TargetConfig::Disk((disk_path.clone(), *disk_size))
+                            }
+                            TargetKind::Partition => {
+                                TargetConfig::Partition((disk_path.clone(), *disk_size))
+                            }
+                            TargetKind::Image => unreachable!(),
+                        };
                         self.page = Page::Profile {
-                            target: TargetConfig::Disk((disk_path.clone(), *disk_size)),
+                            target,
                             selected: InstallConfig::default(),
                             bootloader,
                         };
