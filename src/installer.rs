@@ -541,14 +541,22 @@ where
 {
     let bootloader_efi_name = bootloader_efi_name()?;
     // Open disk and read metadata
-    eprintln!("Opening disk {}", disk_path.as_ref().display());
+    eprintln!(
+        "Opening {} {}",
+        if disk_option.skip_partitions {
+            "partition"
+        } else {
+            "disk"
+        },
+        disk_path.as_ref().display()
+    );
     let mut disk_file = DiskWrapper::open(disk_path.as_ref())?;
     let disk_size = disk_file.size();
     let block_size = disk_file.block_size() as u64;
 
     if let Some(efi_partition_path) = disk_option.efi_partition_path {
         let mut disk_efi = DiskWrapper::open(efi_partition_path)?;
-        eprintln!("Write bootloader to {:?}", efi_partition_path);
+        eprintln!("Writing bootloader partition to {:?}", efi_partition_path);
         format_and_install_efi(
             &mut disk_efi,
             bootloader_efi_name,

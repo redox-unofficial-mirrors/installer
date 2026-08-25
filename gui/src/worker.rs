@@ -271,11 +271,12 @@ pub(crate) fn install<F: FnMut(Message)>(
             println!("Installing boot entry to systemd-boot");
             crate::sys::install_boot_systemd()?;
         }
+        message!("Installation is completed.");
         Ok(())
     }) {
         Ok(_) => f(Message::Success(format!(
-            "Finished installing in {:?}",
-            start.elapsed()
+            "Finished installing in {:.2} seconds",
+            start.elapsed().as_secs_f32()
         ))),
         Err(e) => f(Message::Error(format!("Failed installing: {:?}", e))),
     }

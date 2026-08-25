@@ -286,13 +286,22 @@ impl Application for Window {
                 if let Page::DrivePart {
                     selected_disk_i: Some(i),
                     selected_boot_i,
-                    ..
+                    kind,
                 } = &self.page
                 {
                     if let Some((disk_path, _, disk_size)) = self.disk_paths.get(*i) {
                         let bootloader = selected_boot_i.clone();
+                        let target = match kind {
+                            TargetKind::Drive => {
+                                TargetConfig::Disk((disk_path.clone(), *disk_size))
+                            }
+                            TargetKind::Partition => {
+                                TargetConfig::Partition((disk_path.clone(), *disk_size))
+                            }
+                            TargetKind::Image => unreachable!(),
+                        };
                         self.page = Page::Profile {
-                            target: TargetConfig::Disk((disk_path.clone(), *disk_size)),
+                            target,
                             selected: InstallConfig::default(),
                             bootloader,
                         };
@@ -653,7 +662,8 @@ impl Application for Window {
                                 self.disk_paths
                                     .iter()
                                     .enumerate()
-                                    .filter(|(e, (_, i, _))| *i == is_part && *e != edisk),
+                                    .filter(|(e, (_, i, _))| *i == is_part && *e != edisk)
+                                    .map(|(e, s)| (e + 2, s)),
                             )
                         {
                             #[cfg(target_os = "linux")]
@@ -752,16 +762,16 @@ impl Application for Window {
                 );
 
                 widgets.push(
-                    checkbox(*skip_partition)
+                    checkbox(path_efi.is_some())
                         .label("Write bootloader EFI?")
                         .on_toggle(Message::ImageWriteBootloader)
                         .into(),
                 );
 
-                if path_efi.is_some() {
+                if let Some(path_efi) = path_efi.as_ref() {
                     widgets.push(
                         row![
-                            text_input("e.g. boot.efi", path)
+                            text_input("e.g. boot.efi", path_efi)
                                 .on_input(Message::ImageWriteBootloaderPathInput),
                             if cfg!(target_os = "linux") {
                                 button::standard("Browse").on_press(Message::ImageBrowseBootloader)
