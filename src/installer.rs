@@ -258,9 +258,7 @@ pub fn install_dir(
             println!("\tMembers: {}", members.join(", "));
         }
 
-        FileConfig::new_file("/etc/group".to_string(), groups_data)
-            .with_mod(0o0600, 0, 0)
-            .create(&output_dir)?;
+        FileConfig::new_file("/etc/group".to_string(), groups_data).create(&output_dir)?;
     }
 
     Ok(())
