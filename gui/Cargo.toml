@@ -10,7 +10,7 @@ pkgar-core = "0.2"
 pkgar-keys = "0.2"
 redox_installer = { path = ".." }
 redox_syscall = "0.9"
-toml = "0.8"
+toml = "1"
 # TODO: remove after pkgutils update
 futures-channel = "0.3.32"
 
@@ -29,4 +29,5 @@ default-features = false
 features = ["winit"]
 
 [patch.crates-io]
-ring = { git = "https://gitlab.redox-os.org/redox-os/ring.git", branch = "redox-0.17.8" }
+# https://github.com/briansmith/ring/issues/1999
+ring = { git = "https://gitlab.redox-os.org/redox-os/ring.git", branch = "redox-0.17.16" }
