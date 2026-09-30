@@ -21,8 +21,10 @@ enum Buffer<'a> {
 
 impl DiskWrapper {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        #[cfg_attr(not(target_os = "linux"), expect(unused_mut))]
         let mut disk = OpenOptions::new().read(true).write(true).open(path)?;
         let metadata = disk.metadata()?;
+        #[cfg_attr(not(target_os = "linux"), expect(unused_mut))]
         let mut size = metadata.len();
 
         // size doesn't work here, must seek to figure out

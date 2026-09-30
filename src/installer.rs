@@ -1,7 +1,6 @@
 use anyhow::Context;
 use anyhow::{bail, Result};
 use pkg::Library;
-use rand::{rngs::OsRng, TryRngCore};
 use redoxfs::{unmount_path, Disk, DiskIo, FileSystem, BLOCK_SIZE};
 use termion::input::TermRead;
 
@@ -52,7 +51,7 @@ pub fn get_target() -> String {
 /// by redox_users. If the password is blank, the hash is blank.
 fn hash_password(password: &str) -> Result<String> {
     if !password.is_empty() {
-        let salt = format!("{:X}", OsRng.try_next_u64()?);
+        let salt = format!("{:X}", rand::random::<u64>());
         let config = argon2::Config::default();
         let hash = argon2::hash_encoded(password.as_bytes(), salt.as_bytes(), &config)?;
         Ok(hash)
